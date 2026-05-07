@@ -32,7 +32,7 @@ _store = GPUCatalogStore()
 
 # Comma-separated list of enabled providers. Defaults to aws only.
 # Set ENABLED_CLOUDS=aws,azure,gcp in the environment to enable all.
-_ENABLED = {p.strip().lower() for p in os.getenv("ENABLED_CLOUDS", "aws").split(",")}
+_ENABLED = {p.strip().lower() for p in os.getenv("ENABLED_CLOUDS", "aws,azure,gcp").split(",")}
 _ALL_ADAPTERS = {"aws": AWSAdapter(), "azure": AzureAdapter(), "gcp": GCPAdapter()}
 _adapters = [a for name, a in _ALL_ADAPTERS.items() if name in _ENABLED]
 logger.info("Active cloud adapters: %s", [type(a).__name__ for a in _adapters])
