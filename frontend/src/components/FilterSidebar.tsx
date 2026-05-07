@@ -52,8 +52,8 @@ function Toggle<T extends string>({
 
 const PROVIDERS: { value: CloudProvider; label: string }[] = [
   { value: 'aws', label: 'AWS' },
-  { value: 'azure', label: 'Azure' },
-  { value: 'gcp', label: 'GCP' },
+  // { value: 'azure', label: 'Azure' },   // enable when ENABLED_CLOUDS includes azure
+  // { value: 'gcp', label: 'GCP' },       // enable when ENABLED_CLOUDS includes gcp
 ]
 
 const GPU_FAMILIES: { value: GPUFamily; label: string }[] = [
