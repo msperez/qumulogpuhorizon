@@ -6,7 +6,8 @@
       "Effect": "Allow",
       "Action": [
         "ec2:DescribeInstanceTypeOfferings",
-        "ec2:DescribeSpotPriceHistory"
+        "ec2:DescribeSpotPriceHistory",
+        "ec2:GetSpotPlacementScores"
       ],
       "Resource": "*"
     },

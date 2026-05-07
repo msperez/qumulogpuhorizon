@@ -20,6 +20,8 @@ from src.models.gpu_region import (
 
 logger = logging.getLogger(__name__)
 
+_PROBE_TTL = timedelta(minutes=10)
+
 _AWS_REGIONS: dict[str, tuple[str, float, float, list[str]]] = {
     "us-east-1":      ("US East (N. Virginia)",    38.13,  -78.45, ["US"]),
     "us-west-2":      ("US West (Oregon)",          45.52, -122.68, ["US"]),
@@ -100,6 +102,10 @@ class AWSAdapter(CloudAdapter):
         self._od_cache_ts: Optional[datetime] = None
         self._executor = ThreadPoolExecutor(max_workers=8)
 
+        # Spot placement score cache: {(region_id, instance_type): AvailabilityTier}
+        self._probe_cache: dict[tuple[str, str], AvailabilityTier] = {}
+        self._probe_ts: Optional[datetime] = None
+
         try:
             import boto3  # type: ignore
             import botocore  # type: ignore
@@ -139,6 +145,19 @@ class AWSAdapter(CloudAdapter):
             )
             self._od_cache_ts = datetime.now(timezone.utc)
             logger.info("AWS on-demand price cache refreshed: %d entries", len(self._od_cache))
+
+        # Refresh spot placement scores on a slower cadence (10 min)
+        if (self._probe_ts is None
+                or datetime.now(timezone.utc) - self._probe_ts > _PROBE_TTL):
+            try:
+                new_probe = await loop.run_in_executor(
+                    self._executor, self._fetch_placement_scores
+                )
+                self._probe_cache = new_probe
+                self._probe_ts = datetime.now(timezone.utc)
+                logger.info("AWS spot placement scores refreshed: %d entries", len(new_probe))
+            except Exception as exc:
+                logger.warning("AWS spot placement scores failed: %s — keeping prior cache", exc)
 
         # Fetch all regions in parallel
         futures = {
@@ -207,11 +226,11 @@ class AWSAdapter(CloudAdapter):
                 _FALLBACK_GPU_HR.get(instance, 0.0) / gpu_count,
             )
 
-            # On-demand SKU — availability unknown via public API; show MEDIUM
+            od_avail = self._probe_cache.get((region_id, instance), AvailabilityTier.MEDIUM)
             results.append(self._sku(
                 region_id, display, lat, lon, sov, now, instance,
                 gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
-                PricingType.ON_DEMAND, od_per_gpu, AvailabilityTier.MEDIUM, None,
+                PricingType.ON_DEMAND, od_per_gpu, od_avail, None,
             ))
 
             # Spot SKU — only if we got a real price
@@ -223,6 +242,45 @@ class AWSAdapter(CloudAdapter):
                 ))
 
         return results
+
+    def _fetch_placement_scores(self) -> dict[tuple[str, str], AvailabilityTier]:
+        """
+        Calls ec2.get_spot_placement_scores per instance type across all target regions.
+        Returns {(region_id, instance_type): AvailabilityTier}.
+        Score 8-10 → HIGH, 5-7 → MEDIUM, 1-4 → LOW, 0/absent → UNAVAILABLE.
+        """
+        boto3 = self._boto3
+        # Use us-east-1 as caller region; RegionNames scopes the results
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        region_names = list(_AWS_REGIONS)
+        result: dict[tuple[str, str], AvailabilityTier] = {}
+
+        for instance in _INSTANCE_META:
+            try:
+                resp = ec2.get_spot_placement_scores(
+                    InstanceTypes=[instance],
+                    TargetCapacity=1,
+                    RegionNames=region_names,
+                    SingleAvailabilityZone=False,
+                )
+                for rec in resp.get("SpotPlacementScores", []):
+                    region = rec.get("Region", "")
+                    score = rec.get("Score", 0)
+                    if region not in _AWS_REGIONS:
+                        continue
+                    if score >= 8:
+                        tier = AvailabilityTier.HIGH
+                    elif score >= 5:
+                        tier = AvailabilityTier.MEDIUM
+                    elif score >= 1:
+                        tier = AvailabilityTier.LOW
+                    else:
+                        tier = AvailabilityTier.UNAVAILABLE
+                    result[(region, instance)] = tier
+            except Exception as exc:
+                logger.debug("get_spot_placement_scores failed for %s: %s", instance, exc)
+
+        return result
 
     def _fetch_ondemand_prices(self) -> dict[tuple[str, str], float]:
         """
