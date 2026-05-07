@@ -1,22 +1,13 @@
 import { useState, useEffect } from 'react'
 import { X, Zap, HardDrive, DollarSign, Server } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { GPUSku, RegionSummary, WorkloadProfile } from '@/types/api'
+import type { GPUSku, RegionSummary } from '@/types/api'
 import { availabilityColor, priceBandColor, providerColor } from '@/lib/colors'
 
 interface Props {
   region: RegionSummary
   onClose: () => void
   onConfigure: (sku: GPUSku) => void
-}
-
-const PROFILE_LABELS: Record<WorkloadProfile, string> = {
-  ai_training:    'AI Training',
-  ai_inference:   'AI Inference',
-  hpc_simulation: 'HPC Simulation',
-  ngs_genomics:   'NGS / Genomics',
-  rendering:      'Rendering',
-  generic:        'Generic',
 }
 
 export function RegionPanel({ region, onClose, onConfigure }: Props) {

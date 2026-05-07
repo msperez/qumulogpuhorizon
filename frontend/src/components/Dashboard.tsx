@@ -19,7 +19,7 @@ const PHASES = [
   'running',
 ]
 
-function PhaseProgress({ phase, current }: PhaseStepProps) {
+function PhaseProgress({ current }: PhaseStepProps) {
   const currentIdx = PHASES.indexOf(current)
   return (
     <div className="flex items-center gap-1 mt-2">
