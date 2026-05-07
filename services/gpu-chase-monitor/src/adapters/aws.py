@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-import os
 import random
-from datetime import datetime, timezone
-from typing import Any
-
-import httpx
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from src.adapters.base import CloudAdapter
 from src.models.gpu_region import (
@@ -33,22 +33,18 @@ _AWS_REGIONS: dict[str, tuple[str, float, float, list[str]]] = {
 
 # (instance_type, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem_gb, interconnect)
 _AWS_SKUS: list[tuple[str, GPUFamily, int, int, float, float, str | None]] = [
-    ("p4d.24xlarge",  GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 40.0,  "NVLink"),
-    ("p4de.24xlarge", GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 80.0,  "NVLink"),
-    ("p5.48xlarge",   GPUFamily.NVIDIA_H100, 8,  192, 2048.0, 80.0,  "NVLink+EFAv2"),
-    ("g5.48xlarge",   GPUFamily.NVIDIA_A10G, 8,  192, 768.0,  24.0,  None),
-    ("g4dn.12xlarge", GPUFamily.NVIDIA_T4,   4,  48,  192.0,  16.0,  None),
+    ("p4d.24xlarge",  GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 40.0, "NVLink"),
+    ("p4de.24xlarge", GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 80.0, "NVLink"),
+    ("p5.48xlarge",   GPUFamily.NVIDIA_H100, 8,  192, 2048.0, 80.0, "NVLink+EFAv2"),
+    ("g5.48xlarge",   GPUFamily.NVIDIA_A10G, 8,  192, 768.0,  24.0, None),
+    ("g4dn.12xlarge", GPUFamily.NVIDIA_T4,   4,  48,  192.0,  16.0, None),
 ]
 
-_ON_DEMAND_GPU_HOUR: dict[str, float] = {
-    "p4d.24xlarge":  3.22,
-    "p4de.24xlarge": 4.07,
-    "p5.48xlarge":   9.80,
-    "g5.48xlarge":   1.006,
-    "g4dn.12xlarge": 0.585,
+_INSTANCE_META: dict[str, tuple[GPUFamily, int, int, float, float, str | None]] = {
+    s[0]: s[1:] for s in _AWS_SKUS
 }
 
-# AWS region name → display name used in the Pricing API
+# Pricing API location names differ from region IDs
 _PRICING_LOCATION: dict[str, str] = {
     "us-east-1":      "US East (N. Virginia)",
     "us-west-2":      "US West (Oregon)",
@@ -60,37 +56,72 @@ _PRICING_LOCATION: dict[str, str] = {
     "ca-central-1":   "Canada (Central)",
 }
 
+# Fallback on-demand prices (per GPU-hour) used when Pricing API fails
+_FALLBACK_GPU_HR: dict[str, float] = {
+    "p4d.24xlarge":  3.22,
+    "p4de.24xlarge": 4.07,
+    "p5.48xlarge":   9.80,
+    "g5.48xlarge":   1.006 / 8 * 8,  # already per-instance, /gpu done below
+    "g4dn.12xlarge": 0.585,
+}
+
+# Cache on-demand prices for 6 hours (rarely change)
+_PRICE_CACHE_TTL = timedelta(hours=6)
+
 
 def _price_band(price: float) -> PriceBand:
-    if price < 1.0:   return PriceBand.ECONOMY
-    if price < 5.0:   return PriceBand.STANDARD
-    if price < 15.0:  return PriceBand.PREMIUM
+    if price < 1.0:  return PriceBand.ECONOMY
+    if price < 5.0:  return PriceBand.STANDARD
+    if price < 15.0: return PriceBand.PREMIUM
     return PriceBand.ULTRA
 
 
-def _availability_tier(count: int) -> AvailabilityTier:
-    if count == 0:   return AvailabilityTier.UNAVAILABLE
-    if count < 4:    return AvailabilityTier.LOW
-    if count < 20:   return AvailabilityTier.MEDIUM
+def _avail_tier(count: Optional[int]) -> AvailabilityTier:
+    if count is None:  return AvailabilityTier.MEDIUM
+    if count == 0:     return AvailabilityTier.UNAVAILABLE
+    if count < 4:      return AvailabilityTier.LOW
+    if count < 20:     return AvailabilityTier.MEDIUM
     return AvailabilityTier.HIGH
 
 
 class AWSAdapter(CloudAdapter):
+    """
+    Queries real AWS APIs when boto3 is importable and credentials are reachable
+    (env vars, ~/.aws/credentials, or EC2 instance profile — whichever boto3
+    finds first).  Falls back to simulation transparently.
+    """
     provider = CloudProvider.AWS
 
     def __init__(self) -> None:
-        self._use_real = os.getenv("AWS_REGION") is not None
-        if self._use_real:
-            try:
-                import boto3  # type: ignore  # noqa: F401
-                logger.info("AWS adapter: real mode (boto3)")
-            except ImportError:
-                logger.warning("boto3 not installed — falling back to simulation")
-                self._use_real = False
+        self._boto3 = None
+        self._credentials_ok = False
+        # On-demand price cache: {(region, instance): price_per_gpu_hour}
+        self._od_cache: dict[tuple[str, str], float] = {}
+        self._od_cache_ts: Optional[datetime] = None
+        self._executor = ThreadPoolExecutor(max_workers=8)
+
+        try:
+            import boto3  # type: ignore
+            import botocore  # type: ignore
+            session = boto3.Session()
+            creds = session.get_credentials()
+            if creds is not None:
+                # Resolve to confirm they aren't stubs
+                resolved = creds.get_frozen_credentials()
+                if resolved.access_key:
+                    self._boto3 = boto3
+                    self._credentials_ok = True
+                    logger.info("AWS adapter: real mode — credentials found (%s)",
+                                "instance-profile" if not resolved.token else "sts/env")
+        except Exception as exc:
+            logger.warning("AWS adapter: credential check failed (%s) — using simulation", exc)
 
     async def fetch_skus(self) -> list[GPUSku]:
-        if self._use_real:
-            return await self._fetch_real()
+        if self._credentials_ok:
+            try:
+                return await self._fetch_real()
+            except Exception as exc:
+                logger.error("AWS real fetch failed: %s — falling back to simulation", exc)
         return self._fetch_simulated()
 
     # ------------------------------------------------------------------
@@ -98,90 +129,113 @@ class AWSAdapter(CloudAdapter):
     # ------------------------------------------------------------------
 
     async def _fetch_real(self) -> list[GPUSku]:
-        import boto3  # type: ignore
-        import json
+        loop = asyncio.get_event_loop()
 
+        # Refresh on-demand prices if cache is stale
+        if (self._od_cache_ts is None
+                or datetime.now(timezone.utc) - self._od_cache_ts > _PRICE_CACHE_TTL):
+            self._od_cache = await loop.run_in_executor(
+                self._executor, self._fetch_ondemand_prices
+            )
+            self._od_cache_ts = datetime.now(timezone.utc)
+            logger.info("AWS on-demand price cache refreshed: %d entries", len(self._od_cache))
+
+        # Fetch all regions in parallel
+        futures = {
+            loop.run_in_executor(self._executor, self._fetch_region, region_id): region_id
+            for region_id in _AWS_REGIONS
+        }
+        all_skus: list[GPUSku] = []
+        for coro in asyncio.as_completed(list(futures)):
+            try:
+                skus = await coro
+                all_skus.extend(skus)
+            except Exception as exc:
+                logger.warning("AWS region fetch failed: %s", exc)
+
+        logger.info("AWS real adapter: fetched %d SKUs across %d regions",
+                    len(all_skus), len(_AWS_REGIONS))
+        return all_skus
+
+    def _fetch_region(self, region_id: str) -> list[GPUSku]:
+        boto3 = self._boto3
+        display, lat, lon, sov = _AWS_REGIONS[region_id]
+        now = datetime.now(timezone.utc)
+        ec2 = boto3.client("ec2", region_name=region_id)
+
+        # ── Which GPU instance types are offered in this region? ──────────
+        try:
+            resp = ec2.describe_instance_type_offerings(
+                LocationType="region",
+                Filters=[
+                    {"Name": "instance-type", "Values": list(_INSTANCE_META)},
+                    {"Name": "location",      "Values": [region_id]},
+                ],
+            )
+            offered = {o["InstanceType"] for o in resp["InstanceTypeOfferings"]}
+        except Exception as exc:
+            logger.warning("describe_instance_type_offerings failed %s: %s", region_id, exc)
+            offered = set(_INSTANCE_META)  # assume all offered on error
+
+        # ── Current spot prices ───────────────────────────────────────────
+        spot_gpu_hr: dict[str, float] = {}
+        try:
+            spot_resp = ec2.describe_spot_price_history(
+                InstanceTypes=list(_INSTANCE_META),
+                ProductDescriptions=["Linux/UNIX"],
+                MaxResults=len(_INSTANCE_META) * 6,
+            )
+            # Keep cheapest AZ price per instance type
+            for sp in spot_resp.get("SpotPriceHistory", []):
+                itype = sp["InstanceType"]
+                total_hr = float(sp["SpotPrice"])
+                gpu_count = _INSTANCE_META[itype][1]  # index 1 = gpu_count
+                per_gpu = total_hr / gpu_count
+                if itype not in spot_gpu_hr or per_gpu < spot_gpu_hr[itype]:
+                    spot_gpu_hr[itype] = per_gpu
+        except Exception as exc:
+            logger.warning("describe_spot_price_history failed %s: %s", region_id, exc)
+
+        # ── Build SKU list ────────────────────────────────────────────────
         results: list[GPUSku] = []
-        now = self._now()
+        for instance, (gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _INSTANCE_META.items():
+            if instance not in offered:
+                continue
 
-        # Fetch on-demand prices once from the global Pricing API (us-east-1 endpoint)
-        od_prices = await self._fetch_ondemand_prices(boto3)
+            od_per_gpu = self._od_cache.get(
+                (region_id, instance),
+                _FALLBACK_GPU_HR.get(instance, 0.0) / gpu_count,
+            )
 
-        for region_id, (display, lat, lon, sov) in _AWS_REGIONS.items():
-            ec2 = boto3.client("ec2", region_name=region_id)
+            # On-demand SKU — availability unknown via public API; show MEDIUM
+            results.append(self._sku(
+                region_id, display, lat, lon, sov, now, instance,
+                gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
+                PricingType.ON_DEMAND, od_per_gpu, AvailabilityTier.MEDIUM, None,
+            ))
 
-            # Which GPU instance types are offered in this region?
-            try:
-                resp = ec2.describe_instance_type_offerings(
-                    LocationType="region",
-                    Filters=[
-                        {"Name": "instance-type",
-                         "Values": [s[0] for s in _AWS_SKUS]},
-                        {"Name": "location", "Values": [region_id]},
-                    ],
-                )
-                offered = {o["InstanceType"] for o in resp["InstanceTypeOfferings"]}
-            except Exception as exc:
-                logger.warning("AWS offerings fetch failed for %s: %s", region_id, exc)
-                offered = {s[0] for s in _AWS_SKUS}
-
-            # Spot prices for this region
-            spot_prices: dict[str, float] = {}
-            try:
-                spot_resp = ec2.describe_spot_price_history(
-                    InstanceTypes=[s[0] for s in _AWS_SKUS],
-                    ProductDescriptions=["Linux/UNIX"],
-                    MaxResults=len(_AWS_SKUS) * 5,
-                )
-                for sp in spot_resp.get("SpotPriceHistory", []):
-                    itype = sp["InstanceType"]
-                    price = float(sp["SpotPrice"])
-                    # Keep cheapest AZ price per instance type
-                    if itype not in spot_prices or price < spot_prices[itype]:
-                        spot_prices[itype] = price
-            except Exception as exc:
-                logger.warning("AWS spot prices failed for %s: %s", region_id, exc)
-
-            for (instance, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _AWS_SKUS:
-                if instance not in offered:
-                    continue
-
-                base_price = od_prices.get(
-                    (region_id, instance),
-                    _ON_DEMAND_GPU_HOUR.get(instance, 0.0)
-                )
-                per_gpu_od = base_price / gpu_count
-
-                results.append(self._make_sku(
-                    region_id, display, lat, lon, sov, now,
-                    instance, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
-                    PricingType.ON_DEMAND, per_gpu_od,
-                    availability=AvailabilityTier.MEDIUM,  # capacity not directly queryable
-                    available_count=None,
+            # Spot SKU — only if we got a real price
+            if instance in spot_gpu_hr:
+                results.append(self._sku(
+                    region_id, display, lat, lon, sov, now, instance,
+                    gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
+                    PricingType.SPOT, spot_gpu_hr[instance], AvailabilityTier.LOW, None,
                 ))
-
-                if instance in spot_prices:
-                    spot_per_gpu = spot_prices[instance] / gpu_count
-                    results.append(self._make_sku(
-                        region_id, display, lat, lon, sov, now,
-                        instance, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
-                        PricingType.SPOT, spot_per_gpu,
-                        availability=AvailabilityTier.LOW,  # spot = scarce by nature
-                        available_count=None,
-                    ))
 
         return results
 
-    async def _fetch_ondemand_prices(self, boto3: Any) -> dict[tuple[str, str], float]:
-        """Returns {(region_id, instance_type): total_instance_price_per_hour}."""
+    def _fetch_ondemand_prices(self) -> dict[tuple[str, str], float]:
+        """
+        Calls the AWS Pricing API (us-east-1 global endpoint) for on-demand
+        Linux/shared prices for all GPU instance types in all target regions.
+        Returns {(region_id, instance_type): price_per_gpu_hour}.
+        """
+        boto3 = self._boto3
         pricing = boto3.client("pricing", region_name="us-east-1")
         prices: dict[tuple[str, str], float] = {}
 
-        for region_id, (_, _, _, _) in _AWS_REGIONS.items():
-            location = _PRICING_LOCATION.get(region_id)
-            if not location:
-                continue
-            for (instance, *_) in _AWS_SKUS:
+        for region_id, location in _PRICING_LOCATION.items():
+            for instance, (_, gpu_count, *_rest) in _INSTANCE_META.items():
                 try:
                     resp = pricing.get_products(
                         ServiceCode="AmazonEC2",
@@ -196,27 +250,25 @@ class AWSAdapter(CloudAdapter):
                         MaxResults=1,
                     )
                     for item_str in resp.get("PriceList", []):
-                        import json
                         item = json.loads(item_str)
-                        od_terms = item.get("terms", {}).get("OnDemand", {})
-                        for term in od_terms.values():
+                        for term in item.get("terms", {}).get("OnDemand", {}).values():
                             for dim in term.get("priceDimensions", {}).values():
                                 usd = float(dim["pricePerUnit"].get("USD", 0))
                                 if usd > 0:
-                                    prices[(region_id, instance)] = usd
+                                    prices[(region_id, instance)] = usd / gpu_count
                 except Exception as exc:
                     logger.debug("Pricing API failed %s/%s: %s", region_id, instance, exc)
 
         return prices
 
     @staticmethod
-    def _make_sku(
+    def _sku(
         region_id: str, display: str, lat: float, lon: float, sov: list[str],
-        now: datetime,
-        instance: str, gpu_family: GPUFamily, gpu_count: int, vcpus: int,
+        now: datetime, instance: str,
+        gpu_family: GPUFamily, gpu_count: int, vcpus: int,
         mem_gb: float, gpu_mem: float, interconnect: str | None,
         pricing_type: PricingType, price_per_gpu_hour: float,
-        availability: AvailabilityTier, available_count: int | None,
+        availability: AvailabilityTier, available_count: Optional[int],
     ) -> GPUSku:
         return GPUSku(
             sku_id=f"aws:{region_id}:{instance}:{pricing_type.value}",
@@ -247,22 +299,19 @@ class AWSAdapter(CloudAdapter):
     # ------------------------------------------------------------------
 
     def _fetch_simulated(self) -> list[GPUSku]:
-        now = self._now()
+        now = datetime.now(timezone.utc)
         skus: list[GPUSku] = []
-
         for region_id, (display, lat, lon, sov) in _AWS_REGIONS.items():
-            for (instance, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _AWS_SKUS:
+            for instance, (gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _INSTANCE_META.items():
                 seed = hash(f"{region_id}:{instance}:{now.hour}") % 1000
                 rng = random.Random(seed)
                 available_count = rng.randint(0, 40)
-                base_price = _ON_DEMAND_GPU_HOUR[instance]
-                spot_discount = rng.uniform(0.6, 0.9)
-
-                for pricing_type, multiplier in [
+                base = _FALLBACK_GPU_HR.get(instance, 3.0) / gpu_count
+                for pricing_type, mult in [
                     (PricingType.ON_DEMAND, 1.0),
-                    (PricingType.SPOT, spot_discount),
+                    (PricingType.SPOT, rng.uniform(0.6, 0.9)),
                 ]:
-                    price = round(base_price * multiplier, 4)
+                    price = round(base * mult, 4)
                     skus.append(GPUSku(
                         sku_id=f"aws:{region_id}:{instance}:{pricing_type.value}",
                         provider=CloudProvider.AWS,
@@ -277,12 +326,13 @@ class AWSAdapter(CloudAdapter):
                         pricing_type=pricing_type,
                         price_per_gpu_hour=price,
                         price_band=_price_band(price),
-                        availability=_availability_tier(available_count),
+                        availability=_avail_tier(available_count),
                         available_count=available_count,
                         latitude=lat,
                         longitude=lon,
                         sovereignty_zones=sov,
                         refreshed_at=now,
                         staleness_seconds=0.0,
+                        simulated=True,
                     ))
         return skus
