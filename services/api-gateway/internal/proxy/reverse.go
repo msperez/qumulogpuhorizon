@@ -34,20 +34,22 @@ var upstreamDefaults = map[string]string{
 func Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	registered := map[string]bool{}
-	for prefix, envKey := range upstreamEnv {
-		if registered[envKey] {
+	// Build one reverse proxy per unique upstream URL, then register every prefix.
+	proxies := map[string]*httputil.ReverseProxy{}
+	for _, envKey := range upstreamEnv {
+		if proxies[envKey] != nil {
 			continue
 		}
-		registered[envKey] = true
-
 		target := defaultURL(envKey, upstreamDefaults[envKey])
 		u, err := url.Parse(target)
 		if err != nil {
 			panic("invalid upstream URL for " + envKey + ": " + err.Error())
 		}
+		proxies[envKey] = httputil.NewSingleHostReverseProxy(u)
+	}
 
-		rp := httputil.NewSingleHostReverseProxy(u)
+	for prefix, envKey := range upstreamEnv {
+		rp := proxies[envKey]
 		mux.Handle(prefix+"/", rp)
 		mux.Handle(prefix, rp)
 	}
