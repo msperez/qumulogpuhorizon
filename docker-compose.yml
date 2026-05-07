@@ -1,0 +1,68 @@
+version: '3.9'
+
+services:
+  # ─── Frontend ──────────────────────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - gpu-horizon
+
+  # ─── API Gateway ───────────────────────────────────────────────────────────
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - GPU_CHASE_MONITOR_URL=http://gpu-chase-monitor:8001
+      - PROVISIONING_ENGINE_URL=http://provisioning-engine:8002
+      - COST_TELEMETRY_URL=http://cost-telemetry:8003
+      # Set OIDC_ISSUER + OIDC_CLIENT_ID for production IdP
+    depends_on:
+      - gpu-chase-monitor
+      - provisioning-engine
+      - cost-telemetry
+    networks:
+      - gpu-horizon
+
+  # ─── GPU Chase Monitor ─────────────────────────────────────────────────────
+  gpu-chase-monitor:
+    build: ./services/gpu-chase-monitor
+    ports:
+      - "8001:8001"
+    environment:
+      # Set cloud credentials via env for real adapter mode:
+      # AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+      # AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_ID, ...
+      # GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gpu-horizon
+
+  # ─── Provisioning Engine ───────────────────────────────────────────────────
+  provisioning-engine:
+    build: ./services/provisioning-engine
+    ports:
+      - "8002:8002"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gpu-horizon
+
+  # ─── Cost & Telemetry ──────────────────────────────────────────────────────
+  cost-telemetry:
+    build: ./services/cost-telemetry
+    ports:
+      - "8003:8003"
+    environment:
+      - PROVISIONING_ENGINE_URL=http://provisioning-engine:8002
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gpu-horizon
+
+networks:
+  gpu-horizon:
+    driver: bridge

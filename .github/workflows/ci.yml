@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+
+jobs:
+  gpu-chase-monitor:
+    name: GPU Chase Monitor
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/gpu-chase-monitor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio httpx
+      - run: PYTHONPATH=. pytest -q
+
+  provisioning-engine:
+    name: Provisioning Engine
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/provisioning-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      - run: PYTHONPATH=. pytest -q
+
+  cost-telemetry:
+    name: Cost & Telemetry
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/cost-telemetry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio httpx
+      - run: PYTHONPATH=. pytest -q
+
+  api-gateway:
+    name: API Gateway
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: go build ./...
+      - run: go vet ./...
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run build
