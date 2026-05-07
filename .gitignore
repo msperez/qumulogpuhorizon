@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Go
+services/api-gateway/gateway
+
+# Environment
+.env
+.env.*
+
+# Editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
