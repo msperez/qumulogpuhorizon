@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -21,25 +22,34 @@ from src.models.gpu_region import (
 logger = logging.getLogger(__name__)
 
 _PROBE_TTL = timedelta(minutes=10)
+_PRICE_CACHE_TTL = timedelta(hours=6)
+# get_spot_placement_scores accepts at most 25 instance types per call
+_PLACEMENT_SCORE_BATCH = 25
 
 _AWS_REGIONS: dict[str, tuple[str, float, float, list[str]]] = {
-    "us-east-1":      ("US East (N. Virginia)",    38.13,  -78.45, ["US"]),
-    "us-west-2":      ("US West (Oregon)",          45.52, -122.68, ["US"]),
-    "eu-west-1":      ("Europe (Ireland)",          53.33,  -6.25,  ["EU", "EEA"]),
-    "eu-central-1":   ("Europe (Frankfurt)",        50.11,   8.68,  ["EU", "EEA", "DE"]),
-    "ap-southeast-1": ("Asia Pacific (Singapore)",   1.35,  103.82, ["SG"]),
-    "ap-northeast-1": ("Asia Pacific (Tokyo)",      35.68,  139.69, ["JP"]),
-    "ap-southeast-2": ("Asia Pacific (Sydney)",    -33.87,  151.21, ["AU"]),
-    "ca-central-1":   ("Canada (Central)",          45.42,  -75.70, ["CA"]),
+    "us-east-1":      ("US East (N. Virginia)",    38.13,  -78.45,  ["US"]),
+    "us-east-2":      ("US East (Ohio)",            40.00,  -82.99,  ["US"]),
+    "us-west-2":      ("US West (Oregon)",          45.52, -122.68,  ["US"]),
+    "eu-west-1":      ("Europe (Ireland)",          53.33,   -6.25,  ["EU", "EEA"]),
+    "eu-west-2":      ("Europe (London)",           51.51,   -0.13,  ["EU", "EEA", "UK", "GB"]),
+    "eu-central-1":   ("Europe (Frankfurt)",        50.11,    8.68,  ["EU", "EEA", "DE"]),
+    "ap-southeast-1": ("Asia Pacific (Singapore)",   1.35,  103.82,  ["SG"]),
+    "ap-northeast-1": ("Asia Pacific (Tokyo)",      35.68,  139.69,  ["JP"]),
+    "ap-northeast-2": ("Asia Pacific (Seoul)",      37.57,  126.98,  ["KR"]),
+    "ap-southeast-2": ("Asia Pacific (Sydney)",    -33.87,  151.21,  ["AU"]),
+    "ap-south-1":     ("Asia Pacific (Mumbai)",     19.08,   72.88,  ["IN"]),
+    "ca-central-1":   ("Canada (Central)",          45.42,  -75.70,  ["CA"]),
 }
 
 # (instance_type, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem_gb, interconnect)
 _AWS_SKUS: list[tuple[str, GPUFamily, int, int, float, float, str | None]] = [
-    ("p4d.24xlarge",  GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 40.0, "NVLink"),
-    ("p4de.24xlarge", GPUFamily.NVIDIA_A100, 8,  96,  1152.0, 80.0, "NVLink"),
-    ("p5.48xlarge",   GPUFamily.NVIDIA_H100, 8,  192, 2048.0, 80.0, "NVLink+EFAv2"),
-    ("g5.48xlarge",   GPUFamily.NVIDIA_A10G, 8,  192, 768.0,  24.0, None),
-    ("g4dn.12xlarge", GPUFamily.NVIDIA_T4,   4,  48,  192.0,  16.0, None),
+    ("p4d.24xlarge",  GPUFamily.NVIDIA_A100, 8,  96,  1152.0,  320.0, "NVLink"),
+    ("p4de.24xlarge", GPUFamily.NVIDIA_A100, 8,  96,  1152.0,  640.0, "NVLink"),
+    ("p5.48xlarge",   GPUFamily.NVIDIA_H100, 8, 192,  2048.0,  640.0, "NVLink+EFAv2"),
+    ("g5.48xlarge",   GPUFamily.NVIDIA_A10G, 8, 192,   768.0,  192.0, None),
+    ("g6.48xlarge",   GPUFamily.NVIDIA_L4,   8, 192,   768.0,  192.0, None),
+    ("g6e.48xlarge",  GPUFamily.NVIDIA_L40S, 8, 192,  1536.0,  384.0, "EFAv3"),
+    ("g4dn.12xlarge", GPUFamily.NVIDIA_T4,   4,  48,   192.0,   64.0, None),
 ]
 
 _INSTANCE_META: dict[str, tuple[GPUFamily, int, int, float, float, str | None]] = {
@@ -49,26 +59,29 @@ _INSTANCE_META: dict[str, tuple[GPUFamily, int, int, float, float, str | None]] 
 # Pricing API location names differ from region IDs
 _PRICING_LOCATION: dict[str, str] = {
     "us-east-1":      "US East (N. Virginia)",
+    "us-east-2":      "US East (Ohio)",
     "us-west-2":      "US West (Oregon)",
     "eu-west-1":      "Europe (Ireland)",
+    "eu-west-2":      "Europe (London)",
     "eu-central-1":   "EU (Frankfurt)",
     "ap-southeast-1": "Asia Pacific (Singapore)",
     "ap-northeast-1": "Asia Pacific (Tokyo)",
+    "ap-northeast-2": "Asia Pacific (Seoul)",
     "ap-southeast-2": "Asia Pacific (Sydney)",
+    "ap-south-1":     "Asia Pacific (Mumbai)",
     "ca-central-1":   "Canada (Central)",
 }
 
-# Fallback on-demand prices (per GPU-hour) used when Pricing API fails
+# Fallback on-demand prices (USD per GPU-hour) used when Pricing API fails
 _FALLBACK_GPU_HR: dict[str, float] = {
     "p4d.24xlarge":  3.22,
     "p4de.24xlarge": 4.07,
     "p5.48xlarge":   9.80,
-    "g5.48xlarge":   1.006 / 8 * 8,  # already per-instance, /gpu done below
+    "g5.48xlarge":   1.006,
+    "g6.48xlarge":   2.04,
+    "g6e.48xlarge":  2.44,
     "g4dn.12xlarge": 0.585,
 }
-
-# Cache on-demand prices for 6 hours (rarely change)
-_PRICE_CACHE_TTL = timedelta(hours=6)
 
 
 def _price_band(price: float) -> PriceBand:
@@ -86,11 +99,18 @@ def _avail_tier(count: Optional[int]) -> AvailabilityTier:
     return AvailabilityTier.HIGH
 
 
+def _spot_avail_from_az_count(az_count: int) -> AvailabilityTier:
+    """Derive spot availability from how many AZs in a region have recent spot prices."""
+    if az_count >= 3: return AvailabilityTier.HIGH
+    if az_count == 2: return AvailabilityTier.MEDIUM
+    if az_count == 1: return AvailabilityTier.LOW
+    return AvailabilityTier.UNAVAILABLE
+
+
 class AWSAdapter(CloudAdapter):
     """
-    Queries real AWS APIs when boto3 is importable and credentials are reachable
-    (env vars, ~/.aws/credentials, or EC2 instance profile — whichever boto3
-    finds first).  Falls back to simulation transparently.
+    Queries real AWS APIs when boto3 is importable and credentials are reachable.
+    Falls back to deterministic simulation transparently.
     """
     provider = CloudProvider.AWS
 
@@ -100,25 +120,23 @@ class AWSAdapter(CloudAdapter):
         # On-demand price cache: {(region, instance): price_per_gpu_hour}
         self._od_cache: dict[tuple[str, str], float] = {}
         self._od_cache_ts: Optional[datetime] = None
-        self._executor = ThreadPoolExecutor(max_workers=8)
-
         # Spot placement score cache: {(region_id, instance_type): AvailabilityTier}
         self._probe_cache: dict[tuple[str, str], AvailabilityTier] = {}
         self._probe_ts: Optional[datetime] = None
+        self._executor = ThreadPoolExecutor(max_workers=8)
 
         try:
             import boto3  # type: ignore
-            import botocore  # type: ignore
+            import botocore  # type: ignore  # noqa: F401
             session = boto3.Session()
             creds = session.get_credentials()
             if creds is not None:
-                # Resolve to confirm they aren't stubs
                 resolved = creds.get_frozen_credentials()
                 if resolved.access_key:
                     self._boto3 = boto3
                     self._credentials_ok = True
                     logger.info("AWS adapter: real mode — credentials found (%s)",
-                                "instance-profile" if not resolved.token else "sts/env")
+                                "sts/env" if resolved.token else "static/instance-profile")
         except Exception as exc:
             logger.warning("AWS adapter: credential check failed (%s) — using simulation", exc)
 
@@ -137,7 +155,7 @@ class AWSAdapter(CloudAdapter):
     async def _fetch_real(self) -> list[GPUSku]:
         loop = asyncio.get_event_loop()
 
-        # Refresh on-demand prices if cache is stale
+        # Refresh on-demand prices if cache is stale (6-hour TTL)
         if (self._od_cache_ts is None
                 or datetime.now(timezone.utc) - self._od_cache_ts > _PRICE_CACHE_TTL):
             self._od_cache = await loop.run_in_executor(
@@ -146,7 +164,7 @@ class AWSAdapter(CloudAdapter):
             self._od_cache_ts = datetime.now(timezone.utc)
             logger.info("AWS on-demand price cache refreshed: %d entries", len(self._od_cache))
 
-        # Refresh spot placement scores on a slower cadence (10 min)
+        # Refresh spot placement scores (10-minute TTL, batched per API limit)
         if (self._probe_ts is None
                 or datetime.now(timezone.utc) - self._probe_ts > _PROBE_TTL):
             try:
@@ -182,50 +200,67 @@ class AWSAdapter(CloudAdapter):
         now = datetime.now(timezone.utc)
         ec2 = boto3.client("ec2", region_name=region_id)
 
-        # ── Which GPU instance types are offered in this region? ──────────
+        # ── AZ-level offerings (paginated) ────────────────────────────────
+        # Querying at AZ level tells us which specific AZs have each instance
+        # type — a stronger availability signal than region-level presence.
+        offered_azs: dict[str, set[str]] = {}  # instance → set of AZs
         try:
-            resp = ec2.describe_instance_type_offerings(
-                LocationType="region",
+            paginator = ec2.get_paginator("describe_instance_type_offerings")
+            pages = paginator.paginate(
+                LocationType="availability-zone",
                 Filters=[
                     {"Name": "instance-type", "Values": list(_INSTANCE_META)},
-                    {"Name": "location",      "Values": [region_id]},
                 ],
             )
-            offered = {o["InstanceType"] for o in resp["InstanceTypeOfferings"]}
+            for page in pages:
+                for offering in page["InstanceTypeOfferings"]:
+                    itype = offering["InstanceType"]
+                    az = offering["Location"]
+                    # Only count AZs that belong to this region
+                    if az.startswith(region_id):
+                        offered_azs.setdefault(itype, set()).add(az)
         except Exception as exc:
             logger.warning("describe_instance_type_offerings failed %s: %s", region_id, exc)
-            offered = set(_INSTANCE_META)  # assume all offered on error
+            # Assume all offered with 1 AZ on error
+            offered_azs = {itype: {region_id + "a"} for itype in _INSTANCE_META}
 
-        # ── Current spot prices ───────────────────────────────────────────
-        spot_gpu_hr: dict[str, float] = {}
+        # ── Spot prices — track distinct AZs per instance for availability ──
+        # More AZs reporting spot prices → more readily available spot capacity.
+        spot_gpu_hr: dict[str, float] = {}      # cheapest price per instance
+        spot_az_count: dict[str, int] = {}      # distinct AZs seen per instance
+        spot_az_seen: dict[str, set[str]] = {}  # working set
         try:
             spot_resp = ec2.describe_spot_price_history(
                 InstanceTypes=list(_INSTANCE_META),
                 ProductDescriptions=["Linux/UNIX"],
                 MaxResults=len(_INSTANCE_META) * 6,
             )
-            # Keep cheapest AZ price per instance type
             for sp in spot_resp.get("SpotPriceHistory", []):
                 itype = sp["InstanceType"]
+                az = sp.get("AvailabilityZone", "")
                 total_hr = float(sp["SpotPrice"])
-                gpu_count = _INSTANCE_META[itype][1]  # index 1 = gpu_count
+                gpu_count = _INSTANCE_META[itype][1]
                 per_gpu = total_hr / gpu_count
                 if itype not in spot_gpu_hr or per_gpu < spot_gpu_hr[itype]:
                     spot_gpu_hr[itype] = per_gpu
+                spot_az_seen.setdefault(itype, set()).add(az)
+            spot_az_count = {k: len(v) for k, v in spot_az_seen.items()}
         except Exception as exc:
             logger.warning("describe_spot_price_history failed %s: %s", region_id, exc)
 
         # ── Build SKU list ────────────────────────────────────────────────
         results: list[GPUSku] = []
         for instance, (gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _INSTANCE_META.items():
-            if instance not in offered:
-                continue
+            az_set = offered_azs.get(instance, set())
+            if not az_set:
+                continue  # not available in this region at all
 
             od_per_gpu = self._od_cache.get(
                 (region_id, instance),
-                _FALLBACK_GPU_HR.get(instance, 0.0) / gpu_count,
+                _FALLBACK_GPU_HR.get(instance, 3.0),
             )
 
+            # On-demand availability from spot placement scores (10-min cache)
             od_avail = self._probe_cache.get((region_id, instance), AvailabilityTier.MEDIUM)
             results.append(self._sku(
                 region_id, display, lat, lon, sov, now, instance,
@@ -233,32 +268,34 @@ class AWSAdapter(CloudAdapter):
                 PricingType.ON_DEMAND, od_per_gpu, od_avail, None,
             ))
 
-            # Spot SKU — only if we got a real price
+            # Spot SKU — only emit if we got a real spot price
             if instance in spot_gpu_hr:
+                spot_avail = _spot_avail_from_az_count(spot_az_count.get(instance, 0))
                 results.append(self._sku(
                     region_id, display, lat, lon, sov, now, instance,
                     gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
-                    PricingType.SPOT, spot_gpu_hr[instance], AvailabilityTier.LOW, None,
+                    PricingType.SPOT, spot_gpu_hr[instance], spot_avail, None,
                 ))
 
         return results
 
     def _fetch_placement_scores(self) -> dict[tuple[str, str], AvailabilityTier]:
         """
-        Calls ec2.get_spot_placement_scores per instance type across all target regions.
+        Calls get_spot_placement_scores in batches of ≤25 instance types (API limit).
         Returns {(region_id, instance_type): AvailabilityTier}.
         Score 8-10 → HIGH, 5-7 → MEDIUM, 1-4 → LOW, 0/absent → UNAVAILABLE.
         """
         boto3 = self._boto3
-        # Use us-east-1 as caller region; RegionNames scopes the results
         ec2 = boto3.client("ec2", region_name="us-east-1")
         region_names = list(_AWS_REGIONS)
         result: dict[tuple[str, str], AvailabilityTier] = {}
+        instance_list = list(_INSTANCE_META)
 
-        for instance in _INSTANCE_META:
+        for batch_start in range(0, len(instance_list), _PLACEMENT_SCORE_BATCH):
+            batch = instance_list[batch_start: batch_start + _PLACEMENT_SCORE_BATCH]
             try:
                 resp = ec2.get_spot_placement_scores(
-                    InstanceTypes=[instance],
+                    InstanceTypes=batch,
                     TargetCapacity=1,
                     RegionNames=region_names,
                     SingleAvailabilityZone=False,
@@ -266,7 +303,8 @@ class AWSAdapter(CloudAdapter):
                 for rec in resp.get("SpotPlacementScores", []):
                     region = rec.get("Region", "")
                     score = rec.get("Score", 0)
-                    if region not in _AWS_REGIONS:
+                    instance = rec.get("InstanceType", "")
+                    if region not in _AWS_REGIONS or instance not in _INSTANCE_META:
                         continue
                     if score >= 8:
                         tier = AvailabilityTier.HIGH
@@ -278,7 +316,7 @@ class AWSAdapter(CloudAdapter):
                         tier = AvailabilityTier.UNAVAILABLE
                     result[(region, instance)] = tier
             except Exception as exc:
-                logger.debug("get_spot_placement_scores failed for %s: %s", instance, exc)
+                logger.debug("get_spot_placement_scores batch failed: %s", exc)
 
         return result
 
@@ -364,7 +402,7 @@ class AWSAdapter(CloudAdapter):
                 seed = hash(f"{region_id}:{instance}:{now.hour}") % 1000
                 rng = random.Random(seed)
                 available_count = rng.randint(0, 40)
-                base = _FALLBACK_GPU_HR.get(instance, 3.0) / gpu_count
+                base = _FALLBACK_GPU_HR.get(instance, 3.0)
                 for pricing_type, mult in [
                     (PricingType.ON_DEMAND, 1.0),
                     (PricingType.SPOT, rng.uniform(0.6, 0.9)),

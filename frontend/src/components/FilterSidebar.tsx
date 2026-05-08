@@ -61,7 +61,8 @@ const GPU_FAMILIES: { value: GPUFamily; label: string }[] = [
   { value: 'a100', label: 'A100' },
   { value: 'a10g', label: 'A10G' },
   { value: 'l40s', label: 'L40S' },
-  { value: 't4', label: 'T4' },
+  { value: 'l4',   label: 'L4' },
+  { value: 't4',   label: 'T4' },
 ]
 
 const PRICE_BANDS: { value: PriceBand; label: string }[] = [
