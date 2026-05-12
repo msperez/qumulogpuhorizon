@@ -62,6 +62,18 @@ async def _refresh_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    # Run the first refresh synchronously before accepting requests so the
+    # catalog is never empty on the very first API call.
+    try:
+        all_skus = []
+        for adapter in _adapters:
+            skus = await adapter.fetch_skus()
+            all_skus.extend(skus)
+        await _store.update(all_skus)
+        logger.info("Initial GPU catalog loaded: %d SKUs", len(all_skus))
+    except Exception:
+        logger.exception("Initial GPU catalog fetch failed — catalog will be empty until first background refresh")
+    # Background loop refreshes on the normal cadence from here
     asyncio.create_task(_refresh_loop())
 
 

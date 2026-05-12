@@ -20,7 +20,7 @@ export function DiscoverPage() {
   const [configuringSku, setConfiguringSku] = useState<GPUSku | null>(null)
   const [deployToast, setDeployToast] = useState<string | null>(null)
 
-  const { data, loading } = useCatalog()
+  const { data, loading, error } = useCatalog()
 
   const filteredRegions = (data?.regions ?? []).filter(r => {
     if (filters.providers.length && !filters.providers.includes(r.provider)) return false
@@ -66,9 +66,14 @@ export function DiscoverPage() {
 
       {/* Map area */}
       <div className="flex-1 flex flex-col">
-        {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-qumulo-dark/50 z-10">
-            <div className="text-gray-400 text-sm">Loading GPU catalog…</div>
+        {(loading || error) && (
+          <div className="absolute inset-0 flex items-center justify-center bg-qumulo-dark/50 z-10 pointer-events-none">
+            <div className="text-center">
+              {error
+                ? <p className="text-red-400 text-sm">GPU catalog unavailable — retrying… <span className="text-gray-500">({error})</span></p>
+                : <p className="text-gray-400 text-sm">Loading GPU catalog…</p>
+              }
+            </div>
           </div>
         )}
 
