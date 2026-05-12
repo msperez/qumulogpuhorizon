@@ -60,6 +60,8 @@ class GPUSku(BaseModel):
     price_band: PriceBand
     availability: AvailabilityTier
     available_count: Optional[int] = None    # None = unknown
+    # For capacity blocks: the block duration and start window
+    capacity_block_duration_hours: Optional[float] = None
     latitude: float
     longitude: float
     sovereignty_zones: list[str] = Field(default_factory=list)
@@ -81,6 +83,7 @@ class RegionSummary(BaseModel):
     best_price_per_gpu_hour: float
     price_band: PriceBand
     gpu_families: list[GPUFamily]
+    pricing_types: list[PricingType]
     sku_count: int
     refreshed_at: datetime
     staleness_seconds: float
@@ -98,6 +101,44 @@ class GPUSkuListResponse(BaseModel):
     region: str
     provider: CloudProvider
     skus: list[GPUSku]
+
+
+# Cross-region unified view: one entry per (instance_type, pricing_type) pair
+class CrossRegionEntry(BaseModel):
+    instance_type: str
+    gpu_family: GPUFamily
+    gpu_count: int
+    pricing_type: PricingType
+    available_regions: list[str]
+    best_price_per_gpu_hour: float
+    best_region: str
+    best_provider: CloudProvider
+
+
+class CrossRegionSummary(BaseModel):
+    generated_at: datetime
+    entries: list[CrossRegionEntry]
+
+
+# Capacity threshold: trigger spoke provisioning when GPUs ≥ min_gpu_count
+class CapacityThreshold(BaseModel):
+    threshold_id: str
+    provider: CloudProvider
+    region: str
+    gpu_family: Optional[GPUFamily] = None
+    pricing_type: Optional[PricingType] = None
+    min_gpu_count: int = Field(ge=1, description="Trigger when this many GPUs are available")
+    callback_url: str = Field(description="POST to this URL when threshold is crossed")
+
+
+class CapacityAlert(BaseModel):
+    threshold_id: str
+    provider: CloudProvider
+    region: str
+    gpu_family: Optional[GPUFamily]
+    pricing_type: Optional[PricingType]
+    available_gpu_count: int
+    triggered_at: datetime
 
 
 class WorkloadProfile(str, Enum):
@@ -134,3 +175,4 @@ class SpokeConfigProposal(BaseModel):
     estimated_egress_cost_usd: Optional[float] = None
     hpc_orchestrator: str
     warnings: list[str] = Field(default_factory=list)
+

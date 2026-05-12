@@ -12,6 +12,7 @@ export function DiscoverPage() {
     providers: [],
     gpuFamilies: [],
     priceBands: [],
+    pricingTypes: [],
     availabilityTiers: [],
     sovereigntyZones: [],
   })

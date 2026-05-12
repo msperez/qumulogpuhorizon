@@ -1,9 +1,10 @@
-import type { AvailabilityTier, CloudProvider, GPUFamily, PriceBand } from '@/types/api'
+import type { AvailabilityTier, CloudProvider, GPUFamily, PriceBand, PricingType } from '@/types/api'
 
 export interface Filters {
   providers: CloudProvider[]
   gpuFamilies: GPUFamily[]
   priceBands: PriceBand[]
+  pricingTypes: PricingType[]
   availabilityTiers: AvailabilityTier[]
   sovereigntyZones: string[]
 }
@@ -72,11 +73,27 @@ const PRICE_BANDS: { value: PriceBand; label: string }[] = [
   { value: 'ultra', label: 'Ultra >$15' },
 ]
 
+const PRICING_TYPES: { value: PricingType; label: string }[] = [
+  { value: 'on_demand',      label: 'On-Demand' },
+  { value: 'spot',           label: 'Spot' },
+  { value: 'capacity_block', label: 'Cap Block' },
+  { value: 'committed_use',  label: 'Committed' },
+]
+
 const AVAILABILITY: { value: AvailabilityTier; label: string }[] = [
   { value: 'high', label: 'High' },
   { value: 'medium', label: 'Medium' },
   { value: 'low', label: 'Low' },
 ]
+
+const EMPTY: Filters = {
+  providers: [],
+  gpuFamilies: [],
+  priceBands: [],
+  pricingTypes: [],
+  availabilityTiers: [],
+  sovereigntyZones: [],
+}
 
 export function FilterSidebar({ filters, onChange }: Props) {
   return (
@@ -94,6 +111,12 @@ export function FilterSidebar({ filters, onChange }: Props) {
         options={GPU_FAMILIES}
         selected={filters.gpuFamilies}
         onChange={gpuFamilies => onChange({ ...filters, gpuFamilies })}
+      />
+      <Toggle
+        label="Capacity Type"
+        options={PRICING_TYPES}
+        selected={filters.pricingTypes}
+        onChange={pricingTypes => onChange({ ...filters, pricingTypes })}
       />
       <Toggle
         label="Price Band"
@@ -130,9 +153,7 @@ export function FilterSidebar({ filters, onChange }: Props) {
 
       <button
         className="mt-4 w-full text-xs text-gray-500 hover:text-gray-300 transition-colors"
-        onClick={() =>
-          onChange({ providers: [], gpuFamilies: [], priceBands: [], availabilityTiers: [], sovereigntyZones: [] })
-        }
+        onClick={() => onChange(EMPTY)}
       >
         Clear all filters
       </button>

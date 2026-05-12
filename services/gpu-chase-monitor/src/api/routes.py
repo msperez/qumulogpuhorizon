@@ -8,11 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from src.cache.store import GPUCatalogStore
 from src.models.gpu_region import (
     AvailabilityTier,
+    CapacityThreshold,
     CloudProvider,
+    CrossRegionSummary,
     GPUCatalogResponse,
     GPUFamily,
     GPUSkuListResponse,
     PriceBand,
+    PricingType,
     SpokeConfigProposal,
     SpokeConfigRequest,
     WorkloadProfile,
@@ -29,6 +32,55 @@ def get_store() -> GPUCatalogStore:
 # ---------------------------------------------------------------------------
 # GPU Catalog endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/catalog/cross-region", response_model=CrossRegionSummary)
+async def cross_region_summary(
+    provider: Optional[list[CloudProvider]] = Query(None),
+    gpu_family: Optional[list[GPUFamily]] = Query(None),
+    pricing_type: Optional[list[PricingType]] = Query(None),
+    store: GPUCatalogStore = Depends(get_store),
+) -> CrossRegionSummary:
+    """
+    Unified multi-region view: for each (instance_type, pricing_type) show every
+    region that has available capacity and the best price. Addresses the 'isolated
+    islands' problem — callers see where capacity exists globally in one call.
+    """
+    return await store.get_cross_region_summary(
+        providers=provider,
+        gpu_families=gpu_family,
+        pricing_types=pricing_type,
+    )
+
+
+@router.post("/catalog/thresholds", status_code=201)
+async def register_threshold(
+    threshold: CapacityThreshold,
+    store: GPUCatalogStore = Depends(get_store),
+) -> dict:
+    """
+    Register a capacity threshold. When available GPUs in the specified region
+    reach min_gpu_count, the store POSTs a CapacityAlert JSON payload to
+    callback_url — enabling automated Qumulo spoke provisioning.
+    """
+    store.register_threshold(threshold)
+    return {"status": "registered", "threshold_id": threshold.threshold_id}
+
+
+@router.get("/catalog/thresholds")
+async def list_thresholds(
+    store: GPUCatalogStore = Depends(get_store),
+) -> list[CapacityThreshold]:
+    return store.list_thresholds()
+
+
+@router.delete("/catalog/thresholds/{threshold_id}", status_code=204)
+async def delete_threshold(
+    threshold_id: str,
+    store: GPUCatalogStore = Depends(get_store),
+) -> None:
+    if not store.remove_threshold(threshold_id):
+        raise HTTPException(status_code=404, detail=f"Threshold {threshold_id!r} not found")
+
 
 @router.get("/regions", response_model=GPUCatalogResponse)
 async def list_regions(
@@ -77,6 +129,7 @@ async def list_skus(
     gpu_family: Optional[list[GPUFamily]] = Query(None),
     availability: Optional[list[AvailabilityTier]] = Query(None),
     price_band: Optional[list[PriceBand]] = Query(None),
+    pricing_type: Optional[list[PricingType]] = Query(None),
     sovereignty_zone: Optional[list[str]] = Query(None),
     store: GPUCatalogStore = Depends(get_store),
 ) -> GPUSkuListResponse:
@@ -86,6 +139,7 @@ async def list_skus(
         gpu_families=gpu_family,
         price_bands=price_band,
         availability=availability,
+        pricing_types=pricing_type,
         sovereignty_zones=sovereignty_zone,
     )
     return GPUSkuListResponse(

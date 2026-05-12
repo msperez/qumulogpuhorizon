@@ -190,6 +190,14 @@ class AWSAdapter(CloudAdapter):
             except Exception as exc:
                 logger.warning("AWS region fetch failed: %s", exc)
 
+        # Capacity blocks — run alongside region fetches, failures are non-fatal
+        try:
+            cb_skus = await loop.run_in_executor(self._executor, self._fetch_capacity_blocks)
+            all_skus.extend(cb_skus)
+            logger.info("AWS capacity blocks: %d offerings found", len(cb_skus))
+        except Exception as exc:
+            logger.warning("AWS capacity block fetch failed: %s", exc)
+
         logger.info("AWS real adapter: fetched %d SKUs across %d regions",
                     len(all_skus), len(_AWS_REGIONS))
         return all_skus
@@ -278,6 +286,48 @@ class AWSAdapter(CloudAdapter):
                 ))
 
         return results
+
+    def _fetch_capacity_blocks(self) -> list[GPUSku]:
+        """
+        Fetches available AWS Capacity Block offerings (ML-targeted future reservations).
+        Shell uses these weekly; this makes them visible alongside spot/on-demand.
+        Capacity blocks are guaranteed capacity, so availability is always HIGH.
+        IAM requires ec2:DescribeCapacityBlockOfferings.
+        """
+        boto3 = self._boto3
+        result: list[GPUSku] = []
+        now = datetime.now(timezone.utc)
+
+        for region_id, (display, lat, lon, sov) in _AWS_REGIONS.items():
+            ec2 = boto3.client("ec2", region_name=region_id)
+            for instance, (gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _INSTANCE_META.items():
+                try:
+                    resp = ec2.describe_capacity_block_offerings(
+                        InstanceType=instance,
+                        InstanceCount=1,
+                    )
+                    seen: set[int] = set()
+                    for offering in resp.get("CapacityBlockOfferings", []):
+                        duration_hrs = offering.get("CapacityBlockDurationHours", 0)
+                        upfront = float(offering.get("UpfrontFee", 0) or 0)
+                        if duration_hrs <= 0 or upfront <= 0 or duration_hrs in seen:
+                            continue
+                        seen.add(duration_hrs)
+                        price_per_gpu_hr = (upfront / duration_hrs) / gpu_count
+                        sku = self._sku(
+                            region_id, display, lat, lon, sov, now, instance,
+                            gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
+                            PricingType.CAPACITY_BLOCK, price_per_gpu_hr,
+                            AvailabilityTier.HIGH, None,
+                        )
+                        # Attach block duration so the UI can show "168h block" etc.
+                        sku = sku.model_copy(update={"capacity_block_duration_hours": float(duration_hrs)})
+                        result.append(sku)
+                except Exception as exc:
+                    logger.debug("describe_capacity_block_offerings %s/%s: %s",
+                                 region_id, instance, exc)
+
+        return result
 
     def _fetch_placement_scores(self) -> dict[tuple[str, str], AvailabilityTier]:
         """
