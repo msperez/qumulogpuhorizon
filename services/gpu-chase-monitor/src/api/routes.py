@@ -73,7 +73,7 @@ async def list_thresholds(
     return store.list_thresholds()
 
 
-@router.delete("/catalog/thresholds/{threshold_id}", status_code=204)
+@router.delete("/catalog/thresholds/{threshold_id}", status_code=204, response_model=None)
 async def delete_threshold(
     threshold_id: str,
     store: GPUCatalogStore = Depends(get_store),
