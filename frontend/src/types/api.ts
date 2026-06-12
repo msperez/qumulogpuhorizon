@@ -1,5 +1,5 @@
 export type CloudProvider = 'aws' | 'azure' | 'gcp'
-export type GPUFamily = 'a100' | 'h100' | 'a10g' | 'l40s' | 'l4' | 'v100' | 't4' | 'mi300x'
+export type GPUFamily = 'a100' | 'h100' | 'h200' | 'a10g' | 'l40s' | 'l4' | 'rtx6000' | 'v100' | 't4' | 'mi300x'
 export type AvailabilityTier = 'high' | 'medium' | 'low' | 'unavailable'
 export type PriceBand = 'economy' | 'standard' | 'premium' | 'ultra'
 export type PricingType = 'on_demand' | 'spot' | 'capacity_block' | 'committed_use'

@@ -13,14 +13,16 @@ class CloudProvider(str, Enum):
 
 
 class GPUFamily(str, Enum):
-    NVIDIA_A100 = "a100"
-    NVIDIA_H100 = "h100"
-    NVIDIA_A10G = "a10g"
-    NVIDIA_L40S = "l40s"
-    NVIDIA_L4   = "l4"
-    NVIDIA_V100 = "v100"
-    NVIDIA_T4 = "t4"
-    AMD_MI300X = "mi300x"
+    NVIDIA_A100    = "a100"
+    NVIDIA_H100    = "h100"
+    NVIDIA_H200    = "h200"
+    NVIDIA_A10G    = "a10g"
+    NVIDIA_L40S    = "l40s"
+    NVIDIA_L4      = "l4"
+    NVIDIA_RTX6000 = "rtx6000"   # RTX PRO 6000 Blackwell (g7e)
+    NVIDIA_V100    = "v100"
+    NVIDIA_T4      = "t4"
+    AMD_MI300X     = "mi300x"
 
 
 class AvailabilityTier(str, Enum):

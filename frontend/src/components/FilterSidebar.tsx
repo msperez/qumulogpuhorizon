@@ -58,12 +58,14 @@ const PROVIDERS: { value: CloudProvider; label: string }[] = [
 ]
 
 const GPU_FAMILIES: { value: GPUFamily; label: string }[] = [
-  { value: 'h100', label: 'H100' },
-  { value: 'a100', label: 'A100' },
-  { value: 'a10g', label: 'A10G' },
-  { value: 'l40s', label: 'L40S' },
-  { value: 'l4',   label: 'L4' },
-  { value: 't4',   label: 'T4' },
+  { value: 'h200',    label: 'H200' },
+  { value: 'h100',    label: 'H100' },
+  { value: 'a100',    label: 'A100' },
+  { value: 'rtx6000', label: 'RTX 6000' },
+  { value: 'l40s',    label: 'L40S' },
+  { value: 'a10g',    label: 'A10G' },
+  { value: 'l4',      label: 'L4' },
+  { value: 't4',      label: 'T4' },
 ]
 
 const PRICE_BANDS: { value: PriceBand; label: string }[] = [

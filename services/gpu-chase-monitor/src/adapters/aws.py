@@ -27,29 +27,49 @@ _PRICE_CACHE_TTL = timedelta(hours=6)
 _PLACEMENT_SCORE_BATCH = 25
 
 _AWS_REGIONS: dict[str, tuple[str, float, float, list[str]]] = {
+    # North America
     "us-east-1":      ("US East (N. Virginia)",    38.13,  -78.45,  ["US"]),
     "us-east-2":      ("US East (Ohio)",            40.00,  -82.99,  ["US"]),
+    "us-west-1":      ("US West (N. California)",  37.77, -122.41,  ["US"]),
     "us-west-2":      ("US West (Oregon)",          45.52, -122.68,  ["US"]),
+    "ca-central-1":   ("Canada (Central)",          45.42,  -75.70,  ["CA"]),
+    # South America
+    "sa-east-1":      ("South America (São Paulo)", -23.55, -46.63, ["BR"]),
+    # Europe
     "eu-west-1":      ("Europe (Ireland)",          53.33,   -6.25,  ["EU", "EEA"]),
     "eu-west-2":      ("Europe (London)",           51.51,   -0.13,  ["EU", "EEA", "UK", "GB"]),
+    "eu-west-3":      ("Europe (Paris)",            48.86,    2.35,  ["EU", "EEA", "FR"]),
     "eu-central-1":   ("Europe (Frankfurt)",        50.11,    8.68,  ["EU", "EEA", "DE"]),
+    "eu-north-1":     ("Europe (Stockholm)",        59.33,   18.06,  ["EU", "EEA", "SE"]),
+    # Asia Pacific
+    "ap-south-1":     ("Asia Pacific (Mumbai)",     19.08,   72.88,  ["IN"]),
     "ap-southeast-1": ("Asia Pacific (Singapore)",   1.35,  103.82,  ["SG"]),
+    "ap-southeast-2": ("Asia Pacific (Sydney)",    -33.87,  151.21,  ["AU"]),
     "ap-northeast-1": ("Asia Pacific (Tokyo)",      35.68,  139.69,  ["JP"]),
     "ap-northeast-2": ("Asia Pacific (Seoul)",      37.57,  126.98,  ["KR"]),
-    "ap-southeast-2": ("Asia Pacific (Sydney)",    -33.87,  151.21,  ["AU"]),
-    "ap-south-1":     ("Asia Pacific (Mumbai)",     19.08,   72.88,  ["IN"]),
-    "ca-central-1":   ("Canada (Central)",          45.42,  -75.70,  ["CA"]),
+    "ap-northeast-3": ("Asia Pacific (Osaka)",      34.69,  135.50,  ["JP"]),
 }
 
 # (instance_type, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem_gb, interconnect)
 _AWS_SKUS: list[tuple[str, GPUFamily, int, int, float, float, str | None]] = [
-    ("p4d.24xlarge",  GPUFamily.NVIDIA_A100, 8,  96,  1152.0,  320.0, "NVLink"),
-    ("p4de.24xlarge", GPUFamily.NVIDIA_A100, 8,  96,  1152.0,  640.0, "NVLink"),
-    ("p5.48xlarge",   GPUFamily.NVIDIA_H100, 8, 192,  2048.0,  640.0, "NVLink+EFAv2"),
-    ("g5.48xlarge",   GPUFamily.NVIDIA_A10G, 8, 192,   768.0,  192.0, None),
-    ("g6.48xlarge",   GPUFamily.NVIDIA_L4,   8, 192,   768.0,  192.0, None),
-    ("g6e.48xlarge",  GPUFamily.NVIDIA_L40S, 8, 192,  1536.0,  384.0, "EFAv3"),
-    ("g4dn.12xlarge", GPUFamily.NVIDIA_T4,   4,  48,   192.0,   64.0, None),
+    # H200 — latest generation (p5e/p5en)
+    ("p5e.48xlarge",   GPUFamily.NVIDIA_H200,    8, 192,  2048.0, 1128.0, "NVLink+EFAv3"),
+    ("p5en.48xlarge",  GPUFamily.NVIDIA_H200,    8, 192,  2048.0, 1128.0, "EFAv3"),
+    # H100 — flagship training
+    ("p5.48xlarge",    GPUFamily.NVIDIA_H100,    8, 192,  2048.0,  640.0, "NVLink+EFAv2"),
+    # A100 — proven HPC workhorse
+    ("p4d.24xlarge",   GPUFamily.NVIDIA_A100,    8,  96,  1152.0,  320.0, "NVLink"),
+    ("p4de.24xlarge",  GPUFamily.NVIDIA_A100,    8,  96,  1152.0,  640.0, "NVLink"),
+    # Blackwell RTX PRO 6000 — g7e family (newest gen workloads)
+    ("g7e.48xlarge",   GPUFamily.NVIDIA_RTX6000, 8, 192,   768.0,  768.0, "EFAv3"),
+    # L40S — inference + rendering
+    ("g6e.48xlarge",   GPUFamily.NVIDIA_L40S,    8, 192,  1536.0,  384.0, "EFAv3"),
+    # A10G — mixed inference/training
+    ("g5.48xlarge",    GPUFamily.NVIDIA_A10G,    8, 192,   768.0,  192.0, None),
+    # L4 — cost-efficient inference
+    ("g6.48xlarge",    GPUFamily.NVIDIA_L4,      8, 192,   768.0,  192.0, None),
+    # T4 — entry-level / legacy
+    ("g4dn.12xlarge",  GPUFamily.NVIDIA_T4,      4,  48,   192.0,   64.0, None),
 ]
 
 _INSTANCE_META: dict[str, tuple[GPUFamily, int, int, float, float, str | None]] = {
@@ -60,27 +80,35 @@ _INSTANCE_META: dict[str, tuple[GPUFamily, int, int, float, float, str | None]] 
 _PRICING_LOCATION: dict[str, str] = {
     "us-east-1":      "US East (N. Virginia)",
     "us-east-2":      "US East (Ohio)",
+    "us-west-1":      "US West (N. California)",
     "us-west-2":      "US West (Oregon)",
+    "ca-central-1":   "Canada (Central)",
+    "sa-east-1":      "South America (Sao Paulo)",
     "eu-west-1":      "Europe (Ireland)",
     "eu-west-2":      "Europe (London)",
+    "eu-west-3":      "Europe (Paris)",
     "eu-central-1":   "EU (Frankfurt)",
+    "eu-north-1":     "Europe (Stockholm)",
+    "ap-south-1":     "Asia Pacific (Mumbai)",
     "ap-southeast-1": "Asia Pacific (Singapore)",
+    "ap-southeast-2": "Asia Pacific (Sydney)",
     "ap-northeast-1": "Asia Pacific (Tokyo)",
     "ap-northeast-2": "Asia Pacific (Seoul)",
-    "ap-southeast-2": "Asia Pacific (Sydney)",
-    "ap-south-1":     "Asia Pacific (Mumbai)",
-    "ca-central-1":   "Canada (Central)",
+    "ap-northeast-3": "Asia Pacific (Osaka)",
 }
 
 # Fallback on-demand prices (USD per GPU-hour) used when Pricing API fails
 _FALLBACK_GPU_HR: dict[str, float] = {
-    "p4d.24xlarge":  3.22,
-    "p4de.24xlarge": 4.07,
-    "p5.48xlarge":   9.80,
-    "g5.48xlarge":   1.006,
-    "g6.48xlarge":   2.04,
-    "g6e.48xlarge":  2.44,
-    "g4dn.12xlarge": 0.585,
+    "p5e.48xlarge":   3.90,   # H200 ~$31.2/hr ÷ 8
+    "p5en.48xlarge":  4.10,   # H200 network-optimized
+    "p5.48xlarge":    9.80,   # H100
+    "p4d.24xlarge":   3.22,   # A100 40 GB
+    "p4de.24xlarge":  4.07,   # A100 80 GB
+    "g7e.48xlarge":   3.50,   # RTX PRO 6000 Blackwell (est.)
+    "g6e.48xlarge":   2.44,   # L40S
+    "g5.48xlarge":    1.006,  # A10G
+    "g6.48xlarge":    2.04,   # L4
+    "g4dn.12xlarge":  0.585,  # T4
 }
 
 

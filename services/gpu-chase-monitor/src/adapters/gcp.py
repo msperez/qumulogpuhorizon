@@ -21,48 +21,91 @@ logger = logging.getLogger(__name__)
 
 _GCP_REGIONS: dict[str, tuple[str, float, float, list[str]]] = {
     "us-central1":          ("US Central (Iowa)",          41.85,  -93.62, ["US"]),
+    "us-east1":             ("US East (S. Carolina)",      33.84,  -81.16, ["US"]),
     "us-east4":             ("US East (N. Virginia)",      38.95,  -77.33, ["US"]),
+    "us-east5":             ("US East (Columbus)",         39.96,  -82.99, ["US"]),
+    "us-south1":            ("US South (Dallas)",          32.78,  -96.81, ["US"]),
+    "us-west1":             ("US West (Oregon)",           45.60, -121.18, ["US"]),
     "us-west4":             ("US West (Las Vegas)",        36.17, -115.14, ["US"]),
-    "europe-west4":         ("Europe West (Netherlands)",  52.37,    4.89, ["EU", "EEA", "NL"]),
+    "northamerica-northeast1": ("Canada (Montréal)",       45.50,  -73.57, ["CA"]),
+    "southamerica-east1":   ("South America (São Paulo)", -23.55,  -46.63, ["BR"]),
     "europe-west1":         ("Europe West (Belgium)",      50.45,    3.81, ["EU", "EEA", "BE"]),
+    "europe-west2":         ("Europe West (London)",       51.51,   -0.13, ["EU", "EEA", "UK", "GB"]),
+    "europe-west4":         ("Europe West (Netherlands)",  52.37,    4.89, ["EU", "EEA", "NL"]),
+    "europe-west6":         ("Europe West (Zürich)",       47.37,    8.54, ["EU", "EEA", "CH"]),
+    "europe-west9":         ("Europe West (Paris)",        48.86,    2.35, ["EU", "EEA", "FR"]),
     "asia-east1":           ("Asia East (Taiwan)",         24.05,  120.55, ["TW"]),
+    "asia-northeast1":      ("Asia Northeast (Tokyo)",     35.68,  139.69, ["JP"]),
+    "asia-northeast3":      ("Asia Northeast (Seoul)",     37.57,  126.98, ["KR"]),
+    "asia-south1":          ("Asia South (Mumbai)",        19.08,   72.88, ["IN"]),
     "asia-southeast1":      ("Asia Southeast (Singapore)",  1.35,  103.82, ["SG"]),
     "australia-southeast1": ("Australia Southeast",       -33.86,  151.21, ["AU"]),
+    "me-central1":          ("Middle East (Doha)",         25.29,   51.53, ["QA"]),
 }
 
 # (machine_type, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem_gb, interconnect)
 _GCP_SKUS: list[tuple[str, GPUFamily, int, int, float, float, str | None]] = [
-    ("a2-highgpu-8g",    GPUFamily.NVIDIA_A100, 8,  96,  680.0,  40.0, "NVLink"),
-    ("a2-megagpu-16g",   GPUFamily.NVIDIA_A100, 16, 96,  1360.0, 40.0, "NVLink"),
-    ("a3-highgpu-8g",    GPUFamily.NVIDIA_H100, 8,  208, 1872.0, 80.0, "NVLink"),
-    ("n1-standard-8",    GPUFamily.NVIDIA_T4,   1,  8,   30.0,   16.0, None),
+    # H200 — a3-ultragpu (newest)
+    ("a3-ultragpu-8g",  GPUFamily.NVIDIA_H200,  8,  208, 1872.0, 1128.0, "NVLink+ICI"),
+    # H100 — a3-highgpu / a3-megagpu
+    ("a3-highgpu-8g",   GPUFamily.NVIDIA_H100,  8,  208, 1872.0,  640.0, "NVLink"),
+    ("a3-megagpu-8g",   GPUFamily.NVIDIA_H100,  8,  208, 1872.0,  640.0, "NVLink+SXM5"),
+    # A100 — a2 family
+    ("a2-highgpu-8g",   GPUFamily.NVIDIA_A100,  8,  96,   680.0,  320.0, "NVLink"),
+    ("a2-ultragpu-8g",  GPUFamily.NVIDIA_A100,  8,  96,   680.0,  640.0, "NVLink"),
+    ("a2-megagpu-16g",  GPUFamily.NVIDIA_A100, 16,  96,  1360.0,  320.0, "NVLink"),
+    # L4 — g2-standard
+    ("g2-standard-96",  GPUFamily.NVIDIA_L4,    8,  96,   384.0,  192.0, None),
+    # T4 — n1 with attached GPU
+    ("n1-standard-8",   GPUFamily.NVIDIA_T4,    1,  8,    30.0,   16.0,  None),
 ]
 
 _FALLBACK_PRICES: dict[str, float] = {
-    "a2-highgpu-8g":   2.934,
-    "a2-megagpu-16g":  2.934,
-    "a3-highgpu-8g":   10.46,
-    "n1-standard-8":   0.35,
+    "a3-ultragpu-8g":  4.50,   # H200 (est.)
+    "a3-highgpu-8g":   10.46,  # H100
+    "a3-megagpu-8g":   12.00,  # H100 SXM5 (est.)
+    "a2-highgpu-8g":   2.934,  # A100 40 GB
+    "a2-ultragpu-8g":  3.80,   # A100 80 GB (est.)
+    "a2-megagpu-16g":  2.934,  # A100 40 GB x16
+    "g2-standard-96":  2.04,   # L4
+    "n1-standard-8":   0.35,   # T4
 }
 
-# GCP accelerator type attached to each machine type (used in accelerator queries)
+# GCP accelerator type attached to each machine type
 _MACHINE_ACCELERATOR: dict[str, str] = {
-    "a2-highgpu-8g":  "nvidia-tesla-a100",
-    "a2-megagpu-16g": "nvidia-tesla-a100",
-    "a3-highgpu-8g":  "nvidia-h100-80gb",
-    "n1-standard-8":  "nvidia-tesla-t4",
+    "a3-ultragpu-8g":  "nvidia-h200-141gb",
+    "a3-highgpu-8g":   "nvidia-h100-80gb",
+    "a3-megagpu-8g":   "nvidia-h100-mega-80gb",
+    "a2-highgpu-8g":   "nvidia-tesla-a100",
+    "a2-ultragpu-8g":  "nvidia-a100-80gb",
+    "a2-megagpu-16g":  "nvidia-tesla-a100",
+    "g2-standard-96":  "nvidia-l4",
+    "n1-standard-8":   "nvidia-tesla-t4",
 }
 
-# Zones sampled per region for availability checks (first zone is canonical)
+# Zones sampled per region for availability checks
 _REGION_ZONES: dict[str, list[str]] = {
-    "us-central1":          ["us-central1-a", "us-central1-b", "us-central1-c"],
-    "us-east4":             ["us-east4-a", "us-east4-b"],
-    "us-west4":             ["us-west4-a", "us-west4-b"],
-    "europe-west4":         ["europe-west4-a", "europe-west4-b"],
-    "europe-west1":         ["europe-west1-b", "europe-west1-c"],
-    "asia-east1":           ["asia-east1-a", "asia-east1-b"],
-    "asia-southeast1":      ["asia-southeast1-a", "asia-southeast1-b"],
-    "australia-southeast1": ["australia-southeast1-a"],
+    "us-central1":             ["us-central1-a", "us-central1-b", "us-central1-c"],
+    "us-east1":                ["us-east1-b", "us-east1-c"],
+    "us-east4":                ["us-east4-a", "us-east4-b"],
+    "us-east5":                ["us-east5-a", "us-east5-b"],
+    "us-south1":               ["us-south1-a", "us-south1-b"],
+    "us-west1":                ["us-west1-a", "us-west1-b"],
+    "us-west4":                ["us-west4-a", "us-west4-b"],
+    "northamerica-northeast1": ["northamerica-northeast1-a", "northamerica-northeast1-b"],
+    "southamerica-east1":      ["southamerica-east1-a", "southamerica-east1-b"],
+    "europe-west1":            ["europe-west1-b", "europe-west1-c"],
+    "europe-west2":            ["europe-west2-a", "europe-west2-b"],
+    "europe-west4":            ["europe-west4-a", "europe-west4-b"],
+    "europe-west6":            ["europe-west6-a", "europe-west6-b"],
+    "europe-west9":            ["europe-west9-a", "europe-west9-b"],
+    "asia-east1":              ["asia-east1-a", "asia-east1-b"],
+    "asia-northeast1":         ["asia-northeast1-a", "asia-northeast1-b"],
+    "asia-northeast3":         ["asia-northeast3-a", "asia-northeast3-b"],
+    "asia-south1":             ["asia-south1-a", "asia-south1-b"],
+    "asia-southeast1":         ["asia-southeast1-a", "asia-southeast1-b"],
+    "australia-southeast1":    ["australia-southeast1-a"],
+    "me-central1":             ["me-central1-a"],
 }
 
 
