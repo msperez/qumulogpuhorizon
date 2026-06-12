@@ -173,7 +173,8 @@ class AzureAdapter(CloudAdapter):
                     ))
 
         if not results:
-            raise RuntimeError("Retail Prices API returned no usable GPU SKUs")
+            logger.warning("Azure Retail Prices API returned no usable GPU SKUs — check network or API availability")
+            return []
 
         logger.info("Azure Retail Prices API: fetched %d real SKUs", len(results))
         return results
