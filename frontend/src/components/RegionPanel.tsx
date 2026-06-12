@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { X, Zap, HardDrive, DollarSign, Server } from 'lucide-react'
+import { X, Zap, HardDrive, DollarSign } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { GPUSku, RegionSummary } from '@/types/api'
 import { availabilityColor, priceBandColor, providerColor } from '@/lib/colors'
@@ -112,8 +112,11 @@ export function RegionPanel({ region, onClose, onConfigure }: Props) {
                 <span>{sku.gpu_memory_gb}GB VRAM</span>
               </div>
               <div className="flex items-center gap-1">
-                <Server size={10} />
-                <span>{sku.available_count ?? '?'} avail</span>
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{ background: availabilityColor[sku.availability] }}
+                />
+                <span className="capitalize">{sku.availability}</span>
               </div>
             </div>
 
