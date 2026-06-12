@@ -31,18 +31,11 @@ services:
     build: ./services/gpu-chase-monitor
     ports:
       - "8001:8001"
+    env_file:
+      - path: ./.env
+        required: false
     environment:
       - PYTHONUNBUFFERED=1
-      - AWS_REGION=${AWS_REGION:-}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
-      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
-      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
-      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
-      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
-      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
-      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
     networks:
       - gpu-horizon
 

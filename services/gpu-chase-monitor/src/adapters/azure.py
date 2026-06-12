@@ -52,14 +52,6 @@ _FALLBACK_PRICES: dict[str, float] = {
     "Standard_NV72ads_A10_v5":    0.98,
 }
 
-# Maps arm_sku_name fragment to the skuName keyword used in the Retail Prices API
-_SKU_PRICE_KEYWORD: dict[str, str] = {
-    "Standard_ND96asr_v4":        "ND96asr A100 v4",
-    "Standard_ND96amsr_A100_v4":  "ND96amsr A100 v4",
-    "Standard_ND96isr_H100_v5":   "ND96isr H100 v5",
-    "Standard_NC24ads_A100_v4":   "NC24ads A100 v4",
-    "Standard_NV72ads_A10_v5":    "NV72ads A10 v5",
-}
 
 
 def _price_band(price: float) -> PriceBand:
@@ -110,36 +102,37 @@ class AzureAdapter(CloudAdapter):
         od_prices: dict[tuple[str, str], float] = {}   # (region, arm_sku) → price/hr
         spot_prices: dict[tuple[str, str], float] = {}
 
-        async with httpx.AsyncClient(timeout=20) as client:
-            for arm_sku, keyword in _SKU_PRICE_KEYWORD.items():
-                for price_type, store in [("Consumption", od_prices), ("DevTestConsumption", None)]:
-                    try:
-                        params = {
-                            "$filter": (
-                                f"serviceName eq 'Virtual Machines' "
-                                f"and priceType eq '{price_type}' "
-                                f"and contains(skuName, '{keyword}')"
-                            )
-                        }
-                        resp = await client.get(_AZURE_RETAIL_PRICES_URL, params=params)
-                        resp.raise_for_status()
-                        for item in resp.json().get("Items", []):
-                            region = item.get("armRegionName", "")
-                            # Spot items have "Spot" in skuName
-                            is_spot = "spot" in item.get("skuName", "").lower()
-                            price = float(item.get("retailPrice", 0))
-                            if not price:
-                                continue
-                            if is_spot:
-                                key = (region, arm_sku)
-                                if key not in spot_prices or price < spot_prices[key]:
-                                    spot_prices[key] = price
-                            else:
-                                key = (region, arm_sku)
-                                if key not in od_prices or price < od_prices[key]:
-                                    od_prices[key] = price
-                    except Exception as exc:
-                        logger.debug("Retail Prices API call failed for %s: %s", arm_sku, exc)
+        arm_skus = [s[0] for s in _AZURE_SKUS]
+        async with httpx.AsyncClient(timeout=30) as client:
+            for arm_sku in arm_skus:
+                try:
+                    params = {
+                        "$filter": (
+                            f"serviceName eq 'Virtual Machines' "
+                            f"and armSkuName eq '{arm_sku}'"
+                        )
+                    }
+                    resp = await client.get(_AZURE_RETAIL_PRICES_URL, params=params)
+                    resp.raise_for_status()
+                    items = resp.json().get("Items", [])
+                    logger.debug("Azure pricing %s: %d items returned", arm_sku, len(items))
+                    for item in items:
+                        region = item.get("armRegionName", "")
+                        price_type = item.get("type", "")
+                        sku_name = item.get("skuName", "").lower()
+                        price = float(item.get("retailPrice", 0))
+                        if not price or not region:
+                            continue
+                        key = (region, arm_sku)
+                        is_spot = "spot" in sku_name
+                        if is_spot:
+                            if key not in spot_prices or price < spot_prices[key]:
+                                spot_prices[key] = price
+                        elif price_type == "Consumption":
+                            if key not in od_prices or price < od_prices[key]:
+                                od_prices[key] = price
+                except Exception as exc:
+                    logger.warning("Retail Prices API call failed for %s: %s", arm_sku, exc)
 
         # Build SKU list from the fetched prices
         results: list[GPUSku] = []
