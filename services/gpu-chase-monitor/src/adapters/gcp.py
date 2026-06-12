@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -147,9 +146,10 @@ class GCPAdapter(CloudAdapter):
                 self._use_real = False
 
     async def fetch_skus(self) -> list[GPUSku]:
-        if self._use_real:
-            return await self._fetch_real()
-        return self._fetch_simulated()
+        if not self._use_real:
+            logger.warning("GCP adapter: no credentials — skipping GCP data")
+            return []
+        return await self._fetch_real()
 
     # ------------------------------------------------------------------
     # Real GCP implementation
@@ -299,48 +299,3 @@ class GCPAdapter(CloudAdapter):
             simulated=False,
         )
 
-    # ------------------------------------------------------------------
-    # Simulation fallback
-    # ------------------------------------------------------------------
-
-    def _fetch_simulated(self) -> list[GPUSku]:
-        now = self._now()
-        skus: list[GPUSku] = []
-
-        for region_id, (display, lat, lon, sov) in _GCP_REGIONS.items():
-            for (machine, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _GCP_SKUS:
-                seed = hash(f"gcp:{region_id}:{machine}:{now.hour}") % 1000
-                rng = random.Random(seed)
-                available_count = rng.randint(0, 48)
-                base_price = _FALLBACK_PRICES.get(machine, 2.0)
-                spot_discount = rng.uniform(0.6, 0.8)
-
-                for pricing_type, multiplier in [
-                    (PricingType.ON_DEMAND, 1.0),
-                    (PricingType.SPOT, spot_discount),
-                    (PricingType.COMMITTED_USE, 0.7),
-                ]:
-                    price = round(base_price * multiplier, 4)
-                    skus.append(GPUSku(
-                        sku_id=f"gcp:{region_id}:{machine}:{pricing_type.value}",
-                        provider=CloudProvider.GCP,
-                        region=region_id,
-                        display_region=display,
-                        gpu_family=gpu_family,
-                        gpu_count=gpu_count,
-                        vcpus=vcpus,
-                        memory_gb=mem_gb,
-                        gpu_memory_gb=gpu_mem,
-                        interconnect=interconnect,
-                        pricing_type=pricing_type,
-                        price_per_gpu_hour=price,
-                        price_band=_price_band(price),
-                        availability=_availability_tier(available_count),
-                        available_count=available_count,
-                        latitude=lat,
-                        longitude=lon,
-                        sovereignty_zones=sov,
-                        refreshed_at=now,
-                        staleness_seconds=0.0,
-                    ))
-        return skus

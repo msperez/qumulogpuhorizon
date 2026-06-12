@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
-import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -119,13 +117,6 @@ def _price_band(price: float) -> PriceBand:
     return PriceBand.ULTRA
 
 
-def _avail_tier(count: Optional[int]) -> AvailabilityTier:
-    if count is None:  return AvailabilityTier.MEDIUM
-    if count == 0:     return AvailabilityTier.UNAVAILABLE
-    if count < 4:      return AvailabilityTier.LOW
-    if count < 20:     return AvailabilityTier.MEDIUM
-    return AvailabilityTier.HIGH
-
 
 def _spot_avail_from_az_count(az_count: int) -> AvailabilityTier:
     """Derive spot availability from how many AZs in a region have recent spot prices."""
@@ -169,12 +160,10 @@ class AWSAdapter(CloudAdapter):
             logger.warning("AWS adapter: credential check failed (%s) — using simulation", exc)
 
     async def fetch_skus(self) -> list[GPUSku]:
-        if self._credentials_ok:
-            try:
-                return await self._fetch_real()
-            except Exception as exc:
-                logger.error("AWS real fetch failed: %s — falling back to simulation", exc)
-        return self._fetch_simulated()
+        if not self._credentials_ok:
+            logger.warning("AWS adapter: no credentials — skipping AWS data")
+            return []
+        return await self._fetch_real()
 
     # ------------------------------------------------------------------
     # Real AWS implementation
@@ -465,48 +454,5 @@ class AWSAdapter(CloudAdapter):
             sovereignty_zones=sov,
             refreshed_at=now,
             staleness_seconds=0.0,
-            simulated=False,
         )
 
-    # ------------------------------------------------------------------
-    # Simulation fallback
-    # ------------------------------------------------------------------
-
-    def _fetch_simulated(self) -> list[GPUSku]:
-        now = datetime.now(timezone.utc)
-        skus: list[GPUSku] = []
-        for region_id, (display, lat, lon, sov) in _AWS_REGIONS.items():
-            for instance, (gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _INSTANCE_META.items():
-                seed = hash(f"{region_id}:{instance}:{now.hour}") % 1000
-                rng = random.Random(seed)
-                available_count = rng.randint(0, 40)
-                base = _FALLBACK_GPU_HR.get(instance, 3.0)
-                for pricing_type, mult in [
-                    (PricingType.ON_DEMAND, 1.0),
-                    (PricingType.SPOT, rng.uniform(0.6, 0.9)),
-                ]:
-                    price = round(base * mult, 4)
-                    skus.append(GPUSku(
-                        sku_id=f"aws:{region_id}:{instance}:{pricing_type.value}",
-                        provider=CloudProvider.AWS,
-                        region=region_id,
-                        display_region=display,
-                        gpu_family=gpu_family,
-                        gpu_count=gpu_count,
-                        vcpus=vcpus,
-                        memory_gb=mem_gb,
-                        gpu_memory_gb=gpu_mem,
-                        interconnect=interconnect,
-                        pricing_type=pricing_type,
-                        price_per_gpu_hour=price,
-                        price_band=_price_band(price),
-                        availability=_avail_tier(available_count),
-                        available_count=available_count,
-                        latitude=lat,
-                        longitude=lon,
-                        sovereignty_zones=sov,
-                        refreshed_at=now,
-                        staleness_seconds=0.0,
-                        simulated=True,
-                    ))
-        return skus

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 from datetime import datetime, timezone
 
 import httpx
@@ -70,12 +69,6 @@ def _price_band(price: float) -> PriceBand:
     return PriceBand.ULTRA
 
 
-def _availability_tier(count: int) -> AvailabilityTier:
-    if count == 0:  return AvailabilityTier.UNAVAILABLE
-    if count < 4:   return AvailabilityTier.LOW
-    if count < 20:  return AvailabilityTier.MEDIUM
-    return AvailabilityTier.HIGH
-
 
 class AzureAdapter(CloudAdapter):
     """
@@ -100,12 +93,7 @@ class AzureAdapter(CloudAdapter):
     async def fetch_skus(self) -> list[GPUSku]:
         if self._use_mgmt:
             return await self._fetch_with_credentials()
-        # Always attempt the public Retail Prices API first
-        try:
-            return await self._fetch_public_pricing()
-        except Exception as exc:
-            logger.warning("Azure Retail Prices API failed (%s) — using simulation", exc)
-            return self._fetch_simulated()
+        return await self._fetch_public_pricing()
 
     # ------------------------------------------------------------------
     # Public Azure Retail Prices API — no credentials needed
@@ -222,11 +210,7 @@ class AzureAdapter(CloudAdapter):
         except Exception as exc:
             logger.warning("azure-mgmt-compute resource_skus failed: %s", exc)
 
-        # Fall back to public pricing for prices, add availability info
-        try:
-            base_results = await self._fetch_public_pricing()
-        except Exception:
-            base_results = self._fetch_simulated()
+        base_results = await self._fetch_public_pricing()
 
         # Annotate availability from credentials
         for sku in base_results:
@@ -272,33 +256,3 @@ class AzureAdapter(CloudAdapter):
             simulated=simulated,
         )
 
-    # ------------------------------------------------------------------
-    # Simulation fallback
-    # ------------------------------------------------------------------
-
-    def _fetch_simulated(self) -> list[GPUSku]:
-        now = self._now()
-        skus: list[GPUSku] = []
-
-        for region_id, (display, lat, lon, sov) in _AZURE_REGIONS.items():
-            for (arm_sku, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect) in _AZURE_SKUS:
-                seed = hash(f"azure:{region_id}:{arm_sku}:{now.hour}") % 1000
-                rng = random.Random(seed)
-                available_count = rng.randint(0, 32)
-                base_price = _FALLBACK_PRICES[arm_sku]
-                spot_discount = rng.uniform(0.55, 0.85)
-
-                for pricing_type, multiplier in [
-                    (PricingType.ON_DEMAND, 1.0),
-                    (PricingType.SPOT, spot_discount),
-                ]:
-                    price = round(base_price * multiplier, 4)
-                    skus.append(self._make_sku(
-                        region_id, display, lat, lon, sov, now,
-                        arm_sku, gpu_family, gpu_count, vcpus, mem_gb, gpu_mem, interconnect,
-                        pricing_type, price,
-                        availability=_availability_tier(available_count),
-                        available_count=available_count,
-                        simulated=True,
-                    ))
-        return skus
