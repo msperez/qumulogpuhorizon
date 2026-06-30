@@ -1,0 +1,15 @@
+{
+  "name": "@scorewright/music-core",
+  "version": "0.1.0",
+  "description": "Pure-TypeScript music logic for Scorewright: chord recognition, note quantization, score assembly, and MIDI export.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types src/*.test.ts"
+  },
+  "license": "UNLICENSED"
+}
