@@ -51,7 +51,11 @@ EOF
 
 On Mac (no `sudo` needed):
 ```bash
+# Docker Desktop v4+ (newer)
 docker compose build && docker compose up
+
+# If that fails, use the older syntax:
+docker-compose build && docker-compose up
 ```
 
 On Linux:
